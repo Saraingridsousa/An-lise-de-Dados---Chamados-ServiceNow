@@ -101,26 +101,33 @@ def processar_arquivos(diretorio_base):
         
     df_consolidado = pd.concat(lista_registros, ignore_index=True)
     df_consolidado = df_consolidado.dropna(subset=['Mes_Apuracao'])
+    
+    # =================================================================
+    # NOVA REGRA: Filtra e mantém exclusivamente os registros do ano 2026
+    # =================================================================
+    df_consolidado = df_consolidado[df_consolidado['Mes_Apuracao'].dt.year == 2026]
+    
     return df_consolidado
 
-# ==========================================
-# GERAÇÃO DO GRÁFICO INTERATIVO
-# ==========================================
 def gerar_grafico_interativo(df_valido, diretorio_saida):
     # Agrupa por Mês e Nome Original do Formulário para detalhar no tooltip
     df_plot = df_valido.groupby(['Mes_Apuracao', 'Formulário']).size().reset_index(name='Chamados')
     df_plot['Mes_Str'] = df_plot['Mes_Apuracao'].dt.strftime('%m/%Y')
     df_plot = df_plot.sort_values('Mes_Apuracao')
 
+    # Calcula os totais absolutos por mês para exibir no topo das barras
+    totais_mensais = df_plot.groupby('Mes_Str', sort=False)['Chamados'].sum().reset_index(name='Total_Mes')
+
+    # Criação do gráfico mantendo a separação por 'Formulário' para preservar o tooltip
     fig = px.bar(
         df_plot, 
         x='Mes_Str', 
         y='Chamados', 
-        color='Formulário',
+        color='Formulário', 
         title='Quantidade Mensal de Chamados (Inspeções CSC e Regionais)',
         labels={'Mes_Str': 'Competência', 'Chamados': 'Qtd de Chamados', 'Formulário': 'Nome Original'},
-        text='Chamados',
-        color_discrete_sequence=px.colors.qualitative.Prism
+        # REMOVIDO: text='Chamados' (para não mostrar os números fracionados nos bloquinhos)
+        color_discrete_sequence=['#1f497d'] # Azul escuro uniforme
     )
 
     fig.update_layout(
@@ -128,13 +135,27 @@ def gerar_grafico_interativo(df_valido, diretorio_saida):
         hovermode='x unified',
         xaxis_title="Mês/Ano",
         yaxis_title="Total de Chamados",
-        legend_title="Formulários Contabilizados",
+        showlegend=False, 
         plot_bgcolor='white'
     )
     
+    # Remove as linhas divisórias e oculta qualquer texto remanescente dentro da barra
+    fig.update_traces(marker_line_width=0, textposition='none')
+    
+    # Adiciona o número total cravado no topo de cada barra azul
+    for _, row in totais_mensais.iterrows():
+        fig.add_annotation(
+            x=row['Mes_Str'], 
+            y=row['Total_Mes'], 
+            text=str(row['Total_Mes']),
+            showarrow=False,
+            yshift=10, 
+            font=dict(size=14, color="black", family="Arial Black")
+        )
+    
     caminho_html = diretorio_saida / 'Dashboard_Interativo_Inspecoes.html'
     fig.write_html(caminho_html)
-    print(f"\n[Visualização] Gráfico interativo gerado: {caminho_html}")
+    print(f"\n[Visualização] Gráfico interativo gerado com total único nas barras: {caminho_html}")
     fig.show()
 
 # ==========================================
@@ -149,7 +170,7 @@ def main():
     df_geral = processar_arquivos(caminho_entrada)
     
     if df_geral.empty:
-        print("Nenhum dado válido encontrado para processamento.")
+        print("Nenhum dado válido de 2026 encontrado para processamento.")
         return
 
     # Separa os dados em Válidos e Pendentes
@@ -165,14 +186,14 @@ def main():
     auditoria_nomes = auditoria_nomes.sort_values('Total_Chamados', ascending=False)
 
     # Exportações
-    caminho_detalhado = pasta_resultados / 'Detalhamento_Inspecoes_Mensal.xlsx'
-    caminho_auditoria = pasta_resultados / 'Auditoria_Classificacao_Formularios.xlsx'
+    caminho_detalhado = pasta_resultados / 'Detalhamento_Inspecoes_Mensal_2026.xlsx'
+    caminho_auditoria = pasta_resultados / 'Auditoria_Classificacao_Formularios_2026.xlsx'
     
     tabela_detalhada['Mes_Apuracao'] = tabela_detalhada['Mes_Apuracao'].astype(str)
     tabela_detalhada.to_excel(caminho_detalhado, index=False)
     auditoria_nomes.to_excel(caminho_auditoria, index=False)
     
-    print("\n--- RESUMO DE CLASSIFICAÇÃO ---")
+    print("\n--- RESUMO DE CLASSIFICAÇÃO (Apenas 2026) ---")
     print(f"Total de chamados de Inspeção válidos: {len(df_inspecoes)}")
     print(f"Total de chamados ignorados/pendentes: {len(df_pendentes)}")
     print(f"\nArquivos exportados para a pasta: {pasta_resultados}")
