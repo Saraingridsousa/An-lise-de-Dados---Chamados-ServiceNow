@@ -1,228 +1,185 @@
 import pandas as pd
-import matplotlib.pyplot as plt
+import plotly.express as px
 from pathlib import Path
 import re
 import warnings
 
-# Suprime avisos desnecessários do openpyxl ao ler arquivos
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
+# ==========================================
+# REGRAS DE CLASSIFICAÇÃO
+# ==========================================
+def classificar_formulario(nome_original):
+    """
+    Classifica o formulário aplicando normalização de texto e busca por raízes de palavras.
+    """
+    if pd.isna(nome_original):
+        return 'Ignorado (Vazio)'
+    
+    # Normaliza o texto: minúsculas, sem espaços extras nas pontas
+    nome_norm = str(nome_original).strip().lower()
+    
+    # Trata acentuação básica para a regra
+    nome_norm = nome_norm.replace('ç', 'c').replace('õ', 'o').replace('ã', 'a')
+    
+    # REGRA: Deve conter 'inspecao' ou 'inspecoes' E estar no contexto de 'csc' ou 'regional'
+    if 'inspec' in nome_norm and ('csc' in nome_norm or 'regional' in nome_norm or 'regionais' in nome_norm):
+        return 'Inspeções CSC (Válido)'
+    
+    # Se não atendeu à regra específica, vai para a fila de validação
+    return 'Pendente de Validação'
+
+# ==========================================
+# FUNÇÕES DE EXTRAÇÃO E VALIDAÇÃO
+# ==========================================
 def extrair_competencia_nome(nome_arquivo):
-    """Tenta extrair o padrão de ano e mês (YYYY.MM) do nome do arquivo."""
     match = re.search(r'(20\d{2})\.(\d{2})', nome_arquivo)
     if match:
         return pd.Period(f"{match.group(1)}-{match.group(2)}", freq='M')
     return None
 
 def encontrar_coluna_data(df):
-    """Busca dinamicamente por uma coluna que represente a data de abertura."""
     possiveis_nomes = ['Aberto(a)', 'Aberto', 'Data de Abertura', 'Created', 'Data']
     for col in df.columns:
         if str(col).strip() in possiveis_nomes:
-            return col
+            return str(col).strip()
     return None
 
+# ==========================================
+# PIPELINE DE PROCESSAMENTO
+# ==========================================
 def processar_arquivos(diretorio_base):
     base_path = Path(diretorio_base)
-    resultados_arquivos = []
-    
-    resumo = {
-        'encontrados': 0, 'processados': 0, 'ignorados': 0, 'erros': 0,
-        'total_registros_lidos': 0, 'total_regional': 0, 'total_csc': 0
-    }
+    lista_registros = []
     
     nomes_excluidos = {'ativo_x_mrsls_csc_sla', '2025_x_mrsls_csc_sla'}
     extensoes_validas = {'.xlsx', '.xls', '.csv'}
 
     if not base_path.exists():
-        print(f"Erro: O diretório '{base_path}' não foi encontrado.")
-        return pd.DataFrame(), resumo, []
+        print(f"Erro: Diretório '{base_path}' não encontrado.")
+        return pd.DataFrame()
 
     for arquivo in base_path.iterdir():
-        if not arquivo.is_file():
-            continue
-        
-        resumo['encontrados'] += 1
-        
-        # Ignora arquivos temporários e extensões inválidas
-        if arquivo.name.startswith('~$') or arquivo.suffix.lower() not in extensoes_validas:
-            resumo['ignorados'] += 1
-            continue
-            
-        # Ignora arquivos pelos nomes-base específicos
-        if arquivo.stem in nomes_excluidos:
-            resumo['ignorados'] += 1
+        if not arquivo.is_file() or arquivo.name.startswith('~$') or arquivo.suffix.lower() not in extensoes_validas or arquivo.stem in nomes_excluidos:
             continue
 
         try:
-            # Leitura do arquivo
             if arquivo.suffix.lower() == '.csv':
                 df = pd.read_csv(arquivo, low_memory=False)
             else:
                 df = pd.read_excel(arquivo)
                 
-            resumo['total_registros_lidos'] += len(df)
-            
-            # Normalizar nomes das colunas (remove espaços no início/fim)
             df.columns = [str(c).strip() for c in df.columns]
             
             if 'Formulário' not in df.columns:
-                print(f"[Aviso] Arquivo ignorado (Sem coluna 'Formulário'): {arquivo.name}")
-                resumo['ignorados'] += 1
                 continue
                 
-            # Identificação da competência (Prioridade: Dados reais -> Nome do arquivo)
             col_data = encontrar_coluna_data(df)
             
-            # Filtro das categorias
-            filtro_regional = df['Formulário'] == 'Inspeções CSC Regional'
-            filtro_csc = df['Formulário'] == 'Inspeção CSC'
+            # Aplica a regra de classificação em uma nova coluna
+            df['Categoria_Classificada'] = df['Formulário'].apply(classificar_formulario)
             
-            qtd_regional = filtro_regional.sum()
-            qtd_csc = filtro_csc.sum()
-            
-            df_filtrado = df[filtro_regional | filtro_csc].copy()
-            
-            resumo['total_regional'] += qtd_regional
-            resumo['total_csc'] += qtd_csc
-            
-            if len(df_filtrado) > 0 and col_data:
-                # Agrupa pela data real do dado se houver chamados válidos
-                df_filtrado[col_data] = pd.to_datetime(df_filtrado[col_data], errors='coerce')
-                df_filtrado['Mes_Real'] = df_filtrado[col_data].dt.to_period('M')
-                
-                # Para cada mês encontrado no arquivo, registrar o volume
-                agrupado = df_filtrado.groupby('Mes_Real')['Formulário'].value_counts().unstack(fill_value=0)
-                
-                for mes, row in agrupado.iterrows():
-                    reg = row.get('Inspeções CSC Regional', 0)
-                    csc = row.get('Inspeção CSC', 0)
-                    resultados_arquivos.append({
-                        'Arquivo': arquivo.name,
-                        'Mes': mes,
-                        'Inspecoes_CSC_Regional': reg,
-                        'Inspecao_CSC': csc
-                    })
+            # Identificação do Mês
+            if col_data and not df[col_data].isna().all():
+                df['Data_Real'] = pd.to_datetime(df[col_data], errors='coerce')
+                df['Mes_Apuracao'] = df['Data_Real'].dt.to_period('M')
             else:
-                # Fallback: Se não encontrou chamados das categorias ou não tem coluna de data,
-                # usa o mês de referência do nome do arquivo (se conseguiu ler alguma coisa)
-                mes_ref = extrair_competencia_nome(arquivo.name)
-                resultados_arquivos.append({
-                    'Arquivo': arquivo.name,
-                    'Mes': mes_ref if mes_ref else pd.Period('NaT', freq='M'),
-                    'Inspecoes_CSC_Regional': qtd_regional,
-                    'Inspecao_CSC': qtd_csc
-                })
-                
-            resumo['processados'] += 1
-            print(f"[Sucesso] Lido: {arquivo.name} | Regional: {qtd_regional} | CSC: {qtd_csc}")
+                df['Mes_Apuracao'] = extrair_competencia_nome(arquivo.name)
+            
+            # Extrai apenas as colunas necessárias para a consolidação
+            df_extract = df[['Mes_Apuracao', 'Formulário', 'Categoria_Classificada']].copy()
+            df_extract['Arquivo_Origem'] = arquivo.name
+            df_extract['Quantidade'] = 1
+            
+            lista_registros.append(df_extract)
             
         except Exception as e:
             print(f"[Erro] Falha ao processar '{arquivo.name}': {e}")
-            resumo['erros'] += 1
 
-    return pd.DataFrame(resultados_arquivos), resumo
+    if not lista_registros:
+        return pd.DataFrame()
+        
+    df_consolidado = pd.concat(lista_registros, ignore_index=True)
+    df_consolidado = df_consolidado.dropna(subset=['Mes_Apuracao'])
+    return df_consolidado
 
-def consolidar_dados(df_bruto):
-    if df_bruto.empty:
-        return pd.DataFrame(), []
+# ==========================================
+# GERAÇÃO DO GRÁFICO INTERATIVO
+# ==========================================
+def gerar_grafico_interativo(df_valido, diretorio_saida):
+    # Agrupa por Mês e Nome Original do Formulário para detalhar no tooltip
+    df_plot = df_valido.groupby(['Mes_Apuracao', 'Formulário']).size().reset_index(name='Chamados')
+    df_plot['Mes_Str'] = df_plot['Mes_Apuracao'].dt.strftime('%m/%Y')
+    df_plot = df_plot.sort_values('Mes_Apuracao')
+
+    fig = px.bar(
+        df_plot, 
+        x='Mes_Str', 
+        y='Chamados', 
+        color='Formulário',
+        title='Quantidade Mensal de Chamados (Inspeções CSC e Regionais)',
+        labels={'Mes_Str': 'Competência', 'Chamados': 'Qtd de Chamados', 'Formulário': 'Nome Original'},
+        text='Chamados',
+        color_discrete_sequence=px.colors.qualitative.Prism
+    )
+
+    fig.update_layout(
+        barmode='stack',
+        hovermode='x unified',
+        xaxis_title="Mês/Ano",
+        yaxis_title="Total de Chamados",
+        legend_title="Formulários Contabilizados",
+        plot_bgcolor='white'
+    )
     
-    # Remove registros onde não foi possível identificar o mês
-    df_valido = df_bruto.dropna(subset=['Mes']).copy()
-    
-    # Identificar sobreposições (mesmo mês vindo de arquivos diferentes)
-    contagem_arquivos_por_mes = df_valido.groupby('Mes')['Arquivo'].nunique()
-    sobreposicoes = contagem_arquivos_por_mes[contagem_arquivos_por_mes > 1].index.tolist()
-    
-    # Agrupar por Mês
-    df_consolidado = df_valido.groupby('Mes').agg({
-        'Inspecoes_CSC_Regional': 'sum',
-        'Inspecao_CSC': 'sum'
-    }).reset_index()
-    
-    df_consolidado['Total_Chamados'] = df_consolidado['Inspecoes_CSC_Regional'] + df_consolidado['Inspecao_CSC']
-    
-    # Ordenação cronológica
-    df_consolidado = df_consolidado.sort_values('Mes').reset_index(drop=True)
-    return df_consolidado, sobreposicoes
+    caminho_html = diretorio_saida / 'Dashboard_Interativo_Inspecoes.html'
+    fig.write_html(caminho_html)
+    print(f"\n[Visualização] Gráfico interativo gerado: {caminho_html}")
+    fig.show()
 
-def gerar_grafico(df_consolidado, diretorio_saida):
-    if df_consolidado.empty:
-        print("Sem dados para gerar gráfico.")
-        return
-
-    # Preparar eixo X como string legível
-    meses_str = df_consolidado['Mes'].dt.strftime('%m/%Y')
-    valores = df_consolidado['Total_Chamados']
-
-    plt.figure(figsize=(10, 6))
-    barras = plt.bar(meses_str, valores, color='#2c7bb6', edgecolor='black')
-
-    plt.title('Quantidade Mensal de Chamados de Inspeção CSC', fontsize=14, fontweight='bold', pad=15)
-    plt.xlabel('Competência (Mês/Ano)', fontsize=12)
-    plt.ylabel('Quantidade de Chamados', fontsize=12)
-    plt.xticks(rotation=45)
-    
-    # Adicionar rótulos nas barras
-    for barra in barras:
-        altura = barra.get_height()
-        plt.text(barra.get_x() + barra.get_width()/2., altura + 0.5,
-                 f'{int(altura)}', ha='center', va='bottom', fontsize=11)
-                 
-    # Remove a borda superior e direita (Spines) para visual mais limpo
-    plt.gca().spines['top'].set_visible(False)
-    plt.gca().spines['right'].set_visible(False)
-
-    plt.tight_layout()
-    
-    caminho_grafico = diretorio_saida / 'grafico_inspecoes_mensal.png'
-    plt.savefig(caminho_grafico, dpi=300)
-    plt.show()
-
-def executar_pipeline():
+# ==========================================
+# EXECUÇÃO PRINCIPAL
+# ==========================================
+def main():
     caminho_entrada = r"C:\Users\99006526\MRS Logística SA\Otimização e Gestão Processos - x_mrsls_csc_sla"
     pasta_resultados = Path(caminho_entrada) / "resultados_analise"
     pasta_resultados.mkdir(exist_ok=True)
     
-    print("--- INICIANDO LEITURA DOS ARQUIVOS ---")
-    df_bruto, resumo = processar_arquivos(caminho_entrada)
+    print("Iniciando varredura e classificação...")
+    df_geral = processar_arquivos(caminho_entrada)
     
-    print("\n--- CONSOLIDANDO DADOS ---")
-    df_consolidado, sobreposicoes = consolidar_dados(df_bruto)
+    if df_geral.empty:
+        print("Nenhum dado válido encontrado para processamento.")
+        return
+
+    # Separa os dados em Válidos e Pendentes
+    df_inspecoes = df_geral[df_geral['Categoria_Classificada'] == 'Inspeções CSC (Válido)']
+    df_pendentes = df_geral[df_geral['Categoria_Classificada'] == 'Pendente de Validação']
+
+    # 1. Tabela Detalhada (Por Mês e Nome do Formulário)
+    tabela_detalhada = df_inspecoes.groupby(['Mes_Apuracao', 'Formulário']).size().reset_index(name='Quantidade')
+    tabela_detalhada = tabela_detalhada.sort_values(['Mes_Apuracao', 'Quantidade'], ascending=[True, False])
     
-    print("\n================ RESUMO DA EXECUÇÃO ================")
-    print(f"Arquivos Encontrados: {resumo['encontrados']}")
-    print(f"Arquivos Processados: {resumo['processados']}")
-    print(f"Arquivos Ignorados: {resumo['ignorados']}")
-    print(f"Arquivos com Erro: {resumo['erros']}")
-    print(f"Total de Linhas Analisadas (todas categorias): {resumo['total_registros_lidos']}")
-    print(f"Total 'Inspeções CSC Regional': {resumo['total_regional']}")
-    print(f"Total 'Inspeção CSC': {resumo['total_csc']}")
-    print(f"Total Combinado Geral: {resumo['total_regional'] + resumo['total_csc']}")
+    # 2. Resumo de Auditoria de Nomes (Quais formulários o código encontrou e como classificou)
+    auditoria_nomes = df_geral.groupby(['Formulário', 'Categoria_Classificada']).size().reset_index(name='Total_Chamados')
+    auditoria_nomes = auditoria_nomes.sort_values('Total_Chamados', ascending=False)
+
+    # Exportações
+    caminho_detalhado = pasta_resultados / 'Detalhamento_Inspecoes_Mensal.xlsx'
+    caminho_auditoria = pasta_resultados / 'Auditoria_Classificacao_Formularios.xlsx'
     
-    if sobreposicoes:
-        print("\n[ALERTA DE SOBREPOSIÇÃO]")
-        meses_alerta = [m.strftime('%m/%Y') for m in sobreposicoes]
-        print(f"Atenção! Os seguintes meses tiveram dados extraídos de mais de um arquivo distinto: {', '.join(meses_alerta)}.")
-        print("Existe risco de chamados duplicados nesses meses caso as planilhas parciais (ex: intervalos de dias) possuam os mesmos chamados da planilha mensal. Recomenda-se investigar a origem nesses arquivos.")
-        
-    print("\n================ RESULTADO TABULAR ================")
-    if not df_consolidado.empty:
-        # Exibe no console formatando a data
-        df_exibicao = df_consolidado.copy()
-        df_exibicao['Mes'] = df_exibicao['Mes'].dt.strftime('%m/%Y')
-        print(df_exibicao.to_string(index=False))
-        
-        # Salvar CSV
-        caminho_csv = pasta_resultados / 'tabela_consolidada_inspecoes.csv'
-        df_consolidado.to_csv(caminho_csv, index=False, sep=';', encoding='utf-8-sig')
-        print(f"\nTabela salva em: {caminho_csv}")
-        
-        # Gerar e salvar Gráfico
-        print("Gerando gráfico...")
-        gerar_grafico(df_consolidado, pasta_resultados)
-    else:
-        print("Nenhum dado válido para consolidar.")
+    tabela_detalhada['Mes_Apuracao'] = tabela_detalhada['Mes_Apuracao'].astype(str)
+    tabela_detalhada.to_excel(caminho_detalhado, index=False)
+    auditoria_nomes.to_excel(caminho_auditoria, index=False)
+    
+    print("\n--- RESUMO DE CLASSIFICAÇÃO ---")
+    print(f"Total de chamados de Inspeção válidos: {len(df_inspecoes)}")
+    print(f"Total de chamados ignorados/pendentes: {len(df_pendentes)}")
+    print(f"\nArquivos exportados para a pasta: {pasta_resultados}")
+    
+    # Gera o gráfico interativo apenas com os dados validados
+    if not df_inspecoes.empty:
+        gerar_grafico_interativo(df_inspecoes, pasta_resultados)
 
 if __name__ == "__main__":
-    executar_pipeline()
+    main()
