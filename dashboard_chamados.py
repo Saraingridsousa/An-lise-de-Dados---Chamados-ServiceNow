@@ -116,7 +116,7 @@ def processar_arquivos(diretorio_base):
             df_extract = df[['ID_Chamado', 'Mes_Apuracao', 'Formulário_Original', 'Categoria_Classificada']].copy()
             df_extract['Arquivo_Origem'] = arquivo.name
             
-            # Limpa chamados duplicados APENAS dentro desta planilha
+            
             df_extract = df_extract.drop_duplicates(subset=['ID_Chamado'])
             
             validos_aqui = df_extract[df_extract['Categoria_Classificada'] == 'Inspeções CSC (Válido)']
@@ -124,7 +124,7 @@ def processar_arquivos(diretorio_base):
                 print("    -> Nenhum chamado das categorias exatas foi encontrado nesta planilha.\n")
             else:
                 contagem_por_nome = validos_aqui['Formulário_Original'].value_counts()
-                # O NÚMERO IMPRESSO AQUI AGORA VAI DIRETO PARA O GRÁFICO:
+                
                 print(f"    -> Total de formulários válidos contabilizados: {len(validos_aqui)}")
                 for nome, qtd in contagem_por_nome.items():
                     print(f"       - {qtd} chamados de: '{nome}'")
@@ -143,7 +143,7 @@ def processar_arquivos(diretorio_base):
     df_consolidado = pd.concat(lista_registros, ignore_index=True)
     df_consolidado = df_consolidado.dropna(subset=['Mes_Apuracao'])
     
-    # Mantém apenas os meses de 2026
+    
     df_consolidado = df_consolidado[df_consolidado['Mes_Apuracao'].dt.year == 2026]
     
     return df_consolidado
@@ -155,7 +155,7 @@ def gerar_grafico_interativo(df_valido, diretorio_saida):
     df_plot = df_valido.groupby(['Mes_Apuracao', 'Formulário_Original']).size().reset_index(name='Chamados')
     df_plot['Mes_Str'] = df_plot['Mes_Apuracao'].dt.strftime('%m/%Y')
     
-    # Ordena rigidamente pela linha do tempo
+    
     df_plot = df_plot.sort_values('Mes_Apuracao')
 
     totais_mensais = df_plot.groupby('Mes_Str', sort=False)['Chamados'].sum().reset_index(name='Total_Mes')
@@ -179,7 +179,7 @@ def gerar_grafico_interativo(df_valido, diretorio_saida):
         plot_bgcolor='white'
     )
     
-    # Trava do eixo X: Garante que os meses não saiam de ordem
+    
     meses_em_ordem = totais_mensais['Mes_Str'].tolist()
     fig.update_xaxes(categoryorder='array', categoryarray=meses_em_ordem)
     
