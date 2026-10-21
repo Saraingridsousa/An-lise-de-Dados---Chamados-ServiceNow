@@ -7,30 +7,38 @@ import warnings
 warnings.filterwarnings('ignore', category=UserWarning, module='openpyxl')
 
 # ==========================================
-# REGRAS DE CLASSIFICAÇÃO
+# UTILITÁRIO PARA TRADUZIR COLUNA
+# ==========================================
+def indice_para_coluna_excel(idx):
+    col = ""
+    idx += 1
+    while idx > 0:
+        idx, remainder = divmod(idx - 1, 26)
+        col = chr(65 + remainder) + col
+    return col
+
+# ==========================================
+# REGRAS DE CLASSIFICAÇÃO (BUSCA EXATA)
 # ==========================================
 def classificar_formulario(nome_original):
-    """
-    Classifica o formulário aplicando normalização de texto e busca por raízes de palavras.
-    """
     if pd.isna(nome_original):
         return 'Ignorado (Vazio)'
     
-    # Normaliza o texto: minúsculas, sem espaços extras nas pontas
-    nome_norm = str(nome_original).strip().lower()
+    nome_limpo = str(nome_original).strip()
     
-    # Trata acentuação básica para a regra
-    nome_norm = nome_norm.replace('ç', 'c').replace('õ', 'o').replace('ã', 'a')
+    formularios_validos = [
+        "Inspeções CSC Regional",
+        "Inspeções CSC Regional 1.0",
+        "Inspeção CSC"
+    ]
     
-    # REGRA: Deve conter 'inspecao' ou 'inspecoes' E estar no contexto de 'csc' ou 'regional'
-    if 'inspec' in nome_norm and ('csc' in nome_norm or 'regional' in nome_norm or 'regionais' in nome_norm):
+    if nome_limpo in formularios_validos:
         return 'Inspeções CSC (Válido)'
     
-    # Se não atendeu à regra específica, vai para a fila de validação
     return 'Pendente de Validação'
 
 # ==========================================
-# FUNÇÕES DE EXTRAÇÃO E VALIDAÇÃO
+# EXTRAÇÃO DE MÊS DO NOME DO ARQUIVO
 # ==========================================
 def extrair_competencia_nome(nome_arquivo):
     match = re.search(r'(20\d{2})\.(\d{2})', nome_arquivo)
@@ -38,11 +46,11 @@ def extrair_competencia_nome(nome_arquivo):
         return pd.Period(f"{match.group(1)}-{match.group(2)}", freq='M')
     return None
 
-def encontrar_coluna_data(df):
-    possiveis_nomes = ['Aberto(a)', 'Aberto', 'Data de Abertura', 'Created', 'Data']
-    for col in df.columns:
-        if str(col).strip() in possiveis_nomes:
-            return str(col).strip()
+def encontrar_coluna(df, possiveis_nomes):
+    colunas_df = {str(c).strip().lower(): c for c in df.columns}
+    for nome in possiveis_nomes:
+        if nome.lower() in colunas_df:
+            return colunas_df[nome.lower()]
     return None
 
 # ==========================================
@@ -59,11 +67,21 @@ def processar_arquivos(diretorio_base):
         print(f"Erro: Diretório '{base_path}' não encontrado.")
         return pd.DataFrame()
 
+    print("\n" + "="*70)
+    print("INÍCIO DA VARREDURA DE ARQUIVOS")
+    print("="*70)
+
     for arquivo in base_path.iterdir():
         if not arquivo.is_file() or arquivo.name.startswith('~$') or arquivo.suffix.lower() not in extensoes_validas or arquivo.stem in nomes_excluidos:
             continue
 
         try:
+            mes_arquivo = extrair_competencia_nome(arquivo.name)
+            
+            if not mes_arquivo:
+                print(f"[!] IGNORADO: {arquivo.name} (Sem mês identificado no nome)")
+                continue
+                
             if arquivo.suffix.lower() == '.csv':
                 df = pd.read_csv(arquivo, low_memory=False)
             else:
@@ -71,30 +89,53 @@ def processar_arquivos(diretorio_base):
                 
             df.columns = [str(c).strip() for c in df.columns]
             
-            if 'Formulário' not in df.columns:
+            col_form = encontrar_coluna(df, ['Formulário', 'Formulario', 'Item'])
+            col_id = encontrar_coluna(df, ['Número', 'Numero', 'ID', 'Ticket'])
+            
+            if not col_form:
+                print(f"[X] IGNORADO: {arquivo.name}")
+                print(f"    Motivo: Coluna 'Formulário' não encontrada.\n")
                 continue
                 
-            col_data = encontrar_coluna_data(df)
+            idx_col = df.columns.get_loc(col_form)
+            letra_col = indice_para_coluna_excel(idx_col)
             
-            # Aplica a regra de classificação em uma nova coluna
-            df['Categoria_Classificada'] = df['Formulário'].apply(classificar_formulario)
+            print(f"[+] LENDO: {arquivo.name}")
+            print(f"    -> Coluna 'Formulário' encontrada: Letra {letra_col}")
             
-            # Identificação do Mês
-            if col_data and not df[col_data].isna().all():
-                df['Data_Real'] = pd.to_datetime(df[col_data], errors='coerce')
-                df['Mes_Apuracao'] = df['Data_Real'].dt.to_period('M')
+            df['Categoria_Classificada'] = df[col_form].apply(classificar_formulario)
+            df['Mes_Apuracao'] = mes_arquivo
+            
+            if col_id:
+                df['ID_Chamado'] = df[col_id].astype(str)
             else:
-                df['Mes_Apuracao'] = extrair_competencia_nome(arquivo.name)
+                df['ID_Chamado'] = arquivo.name + "_" + df.index.astype(str)
+                
+            df['Formulário_Original'] = df[col_form].astype(str).str.strip()
             
-            # Extrai apenas as colunas necessárias para a consolidação
-            df_extract = df[['Mes_Apuracao', 'Formulário', 'Categoria_Classificada']].copy()
+            df_extract = df[['ID_Chamado', 'Mes_Apuracao', 'Formulário_Original', 'Categoria_Classificada']].copy()
             df_extract['Arquivo_Origem'] = arquivo.name
-            df_extract['Quantidade'] = 1
+            
+            # Limpa chamados duplicados APENAS dentro desta planilha
+            df_extract = df_extract.drop_duplicates(subset=['ID_Chamado'])
+            
+            validos_aqui = df_extract[df_extract['Categoria_Classificada'] == 'Inspeções CSC (Válido)']
+            if validos_aqui.empty:
+                print("    -> Nenhum chamado das categorias exatas foi encontrado nesta planilha.\n")
+            else:
+                contagem_por_nome = validos_aqui['Formulário_Original'].value_counts()
+                # O NÚMERO IMPRESSO AQUI AGORA VAI DIRETO PARA O GRÁFICO:
+                print(f"    -> Total de formulários válidos contabilizados: {len(validos_aqui)}")
+                for nome, qtd in contagem_por_nome.items():
+                    print(f"       - {qtd} chamados de: '{nome}'")
+                print("") 
             
             lista_registros.append(df_extract)
             
         except Exception as e:
-            print(f"[Erro] Falha ao processar '{arquivo.name}': {e}")
+            print(f"[!] ERRO ao processar '{arquivo.name}': {e}\n")
+
+    print("="*70)
 
     if not lista_registros:
         return pd.DataFrame()
@@ -102,32 +143,31 @@ def processar_arquivos(diretorio_base):
     df_consolidado = pd.concat(lista_registros, ignore_index=True)
     df_consolidado = df_consolidado.dropna(subset=['Mes_Apuracao'])
     
-    # =================================================================
-    # NOVA REGRA: Filtra e mantém exclusivamente os registros do ano 2026
-    # =================================================================
+    # Mantém apenas os meses de 2026
     df_consolidado = df_consolidado[df_consolidado['Mes_Apuracao'].dt.year == 2026]
     
     return df_consolidado
 
+# ==========================================
+# GERAÇÃO DO GRÁFICO INTERATIVO
+# ==========================================
 def gerar_grafico_interativo(df_valido, diretorio_saida):
-    # Agrupa por Mês e Nome Original do Formulário para detalhar no tooltip
-    df_plot = df_valido.groupby(['Mes_Apuracao', 'Formulário']).size().reset_index(name='Chamados')
+    df_plot = df_valido.groupby(['Mes_Apuracao', 'Formulário_Original']).size().reset_index(name='Chamados')
     df_plot['Mes_Str'] = df_plot['Mes_Apuracao'].dt.strftime('%m/%Y')
+    
+    # Ordena rigidamente pela linha do tempo
     df_plot = df_plot.sort_values('Mes_Apuracao')
 
-    # Calcula os totais absolutos por mês para exibir no topo das barras
     totais_mensais = df_plot.groupby('Mes_Str', sort=False)['Chamados'].sum().reset_index(name='Total_Mes')
 
-    # Criação do gráfico mantendo a separação por 'Formulário' para preservar o tooltip
     fig = px.bar(
         df_plot, 
         x='Mes_Str', 
         y='Chamados', 
-        color='Formulário', 
-        title='Quantidade Mensal de Chamados (Inspeções CSC e Regionais)',
-        labels={'Mes_Str': 'Competência', 'Chamados': 'Qtd de Chamados', 'Formulário': 'Nome Original'},
-        # REMOVIDO: text='Chamados' (para não mostrar os números fracionados nos bloquinhos)
-        color_discrete_sequence=['#1f497d'] # Azul escuro uniforme
+        color='Formulário_Original', 
+        title='Quantidade Mensal de Chamados (Inspeções CSC)',
+        labels={'Mes_Str': 'Competência', 'Chamados': 'Qtd de Chamados', 'Formulário_Original': 'Nome Original'},
+        color_discrete_sequence=['#1f497d'] 
     )
 
     fig.update_layout(
@@ -139,10 +179,12 @@ def gerar_grafico_interativo(df_valido, diretorio_saida):
         plot_bgcolor='white'
     )
     
-    # Remove as linhas divisórias e oculta qualquer texto remanescente dentro da barra
+    # Trava do eixo X: Garante que os meses não saiam de ordem
+    meses_em_ordem = totais_mensais['Mes_Str'].tolist()
+    fig.update_xaxes(categoryorder='array', categoryarray=meses_em_ordem)
+    
     fig.update_traces(marker_line_width=0, textposition='none')
     
-    # Adiciona o número total cravado no topo de cada barra azul
     for _, row in totais_mensais.iterrows():
         fig.add_annotation(
             x=row['Mes_Str'], 
@@ -155,7 +197,7 @@ def gerar_grafico_interativo(df_valido, diretorio_saida):
     
     caminho_html = diretorio_saida / 'Dashboard_Interativo_Inspecoes.html'
     fig.write_html(caminho_html)
-    print(f"\n[Visualização] Gráfico interativo gerado com total único nas barras: {caminho_html}")
+    print(f"\n[Visualização] Gráfico gerado com sucesso: {caminho_html}")
     fig.show()
 
 # ==========================================
@@ -166,26 +208,20 @@ def main():
     pasta_resultados = Path(caminho_entrada) / "resultados_analise"
     pasta_resultados.mkdir(exist_ok=True)
     
-    print("Iniciando varredura e classificação...")
     df_geral = processar_arquivos(caminho_entrada)
     
     if df_geral.empty:
         print("Nenhum dado válido de 2026 encontrado para processamento.")
         return
 
-    # Separa os dados em Válidos e Pendentes
     df_inspecoes = df_geral[df_geral['Categoria_Classificada'] == 'Inspeções CSC (Válido)']
-    df_pendentes = df_geral[df_geral['Categoria_Classificada'] == 'Pendente de Validação']
-
-    # 1. Tabela Detalhada (Por Mês e Nome do Formulário)
-    tabela_detalhada = df_inspecoes.groupby(['Mes_Apuracao', 'Formulário']).size().reset_index(name='Quantidade')
+    
+    tabela_detalhada = df_inspecoes.groupby(['Mes_Apuracao', 'Formulário_Original']).size().reset_index(name='Quantidade')
     tabela_detalhada = tabela_detalhada.sort_values(['Mes_Apuracao', 'Quantidade'], ascending=[True, False])
     
-    # 2. Resumo de Auditoria de Nomes (Quais formulários o código encontrou e como classificou)
-    auditoria_nomes = df_geral.groupby(['Formulário', 'Categoria_Classificada']).size().reset_index(name='Total_Chamados')
+    auditoria_nomes = df_geral.groupby(['Formulário_Original', 'Categoria_Classificada']).size().reset_index(name='Total_Chamados')
     auditoria_nomes = auditoria_nomes.sort_values('Total_Chamados', ascending=False)
 
-    # Exportações
     caminho_detalhado = pasta_resultados / 'Detalhamento_Inspecoes_Mensal_2026.xlsx'
     caminho_auditoria = pasta_resultados / 'Auditoria_Classificacao_Formularios_2026.xlsx'
     
@@ -193,12 +229,9 @@ def main():
     tabela_detalhada.to_excel(caminho_detalhado, index=False)
     auditoria_nomes.to_excel(caminho_auditoria, index=False)
     
-    print("\n--- RESUMO DE CLASSIFICAÇÃO (Apenas 2026) ---")
-    print(f"Total de chamados de Inspeção válidos: {len(df_inspecoes)}")
-    print(f"Total de chamados ignorados/pendentes: {len(df_pendentes)}")
-    print(f"\nArquivos exportados para a pasta: {pasta_resultados}")
+    print("\n--- RESUMO FINAL DA EXECUÇÃO ---")
+    print(f"Total de chamados validados (Ano 2026): {len(df_inspecoes)}")
     
-    # Gera o gráfico interativo apenas com os dados validados
     if not df_inspecoes.empty:
         gerar_grafico_interativo(df_inspecoes, pasta_resultados)
 
