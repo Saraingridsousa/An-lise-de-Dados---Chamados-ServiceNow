@@ -1,68 +1,108 @@
 import pandas as pd
-import plotly.express as px
 from pathlib import Path
+import re
 
-def gerar_grafico_gestor():
-    # Caminho do arquivo detalhado que geramos na Etapa 2
+def main():
+    print("[1] Iniciando cruzamento e purificação de dados: ServiceNow + RH")
+    
+    # Define caminhos
     caminho_base = Path(r"C:\Users\99006526\MRS Logística SA\Otimização e Gestão Processos - x_mrsls_csc_sla")
-    arquivo_dados = caminho_base / "resultados_correlacao_gerencias" / "1_Chamados_Classificados_por_Gerencia.xlsx"
+    arquivo_service_now = caminho_base / "x_mrsls_csc_sla.xlsx"
+    arquivo_canais = caminho_base / "Canal por Coordenação.xlsx"
+    pasta_resultados = caminho_base / "resultados_correlacao_gerencias"
     
-    if not arquivo_dados.exists():
-        print("Erro: O arquivo 1_Chamados_Classificados_por_Gerencia.xlsx não foi encontrado.")
-        return
+    pasta_resultados.mkdir(parents=True, exist_ok=True)
+    
+    # 1. Carrega as bases
+    print("[2] Carregando a base bruta do ServiceNow e matriz de Canais...")
+    df_sn = pd.read_excel(arquivo_service_now, dtype=str)
+    df_canais = pd.read_excel(arquivo_canais, dtype=str)
+    
+    # 2. Higieniza e padroniza e-mails na base de Canais
+    def limpar_email(email):
+        if pd.isna(email): return ""
+        email = str(email).strip().lower()
+        if '@' not in email and email != "":
+            email = email + "@mrs.com.br"
+        return email
 
-    # Lê os dados garantindo que o mês seja tratado como texto para o gráfico
-    df = pd.read_excel(arquivo_dados, dtype=str)
-    
-    # Filtra apenas os chamados onde o e-mail ou nome do gestor contém "fabiana"
-    # O preenchimento com str(x).lower() evita erros com células vazias
-    filtro_fabiana = df['Email_Gestor'].apply(lambda x: 'fabiana' in str(x).lower()) | \
-                     df['Nome_Gestor'].apply(lambda x: 'fabiana' in str(x).lower())
-    
-    df_fabiana = df[filtro_fabiana].copy()
-    
-    if df_fabiana.empty:
-        print("Nenhum chamado encontrado para a gestora Fabiana Mara.")
-        return
+    df_canais['Email_Gestor_Clean'] = df_canais['Email Gestor'].apply(limpar_email)
+    df_canais['Nome_Gestor_Clean'] = df_canais['Gestor '].fillna('').astype(str).str.strip().str.upper()
+    df_canais['Canal_Atendimento_Clean'] = df_canais['Canal de Atendimento'].fillna('').astype(str).str.strip().str.upper()
 
-    # Agrupa a quantidade de chamados por Mês
-    df_plot = df_fabiana.groupby('Competência_Mensal').size().reset_index(name='Total_Chamados')
-    df_plot = df_plot.sort_values('Competência_Mensal')
+    # 3. Limpeza Inicial do ServiceNow e formatação de datas
+    print("[3] Higienizando colunas e convertendo datas para competência 2026...")
+    df_sn['Canal_Clean'] = df_sn['Subcategoria'].fillna('').astype(str).str.strip().str.upper()
+    df_sn.rename(columns={'Criação de': 'Criacao_De_Original'}, inplace=True)
+    
+    # Processa e extrai a data de criação
+    if 'Criado' in df_sn.columns:
+        df_sn['Data_Criacao'] = pd.to_datetime(df_sn['Criado'], format='%d/%m/%Y %H:%M:%S', errors='coerce')
+    else:
+        df_sn['Data_Criacao'] = pd.to_datetime(df_sn.iloc[:, 1], format='%d/%m/%Y %H:%M:%S', errors='coerce')
 
-    # Criação do Gráfico Interativo no Plotly
-    fig = px.bar(
-        df_plot, 
-        x='Competência_Mensal', 
-        y='Total_Chamados',
-        title='Evolução Mensal de Chamados - Gestão: Fabiana Mara (Exclui Inspeções CSC)',
-        labels={'Competência_Mensal': 'Mês de Apuração', 'Total_Chamados': 'Quantidade de Chamados'},
-        color_discrete_sequence=['#1f497d'] # Azul padrão
+    # Filtra apenas o ano de 2026 e cria coluna YYYY-MM
+    tamanho_antes = len(df_sn)
+    df_sn = df_sn[df_sn['Data_Criacao'].dt.year == 2026].copy()
+    df_sn['Competência_Mensal'] = df_sn['Data_Criacao'].dt.strftime('%Y-%m')
+    tamanho_depois = len(df_sn)
+    print(f"    -> {tamanho_antes - tamanho_depois} chamados descartados (Fora de 2026 ou data inválida).")
+
+    # 4. Extração segura da Matrícula de quem abriu (Criação de)
+    print("[4] Extraindo matrículas de quem abriu o chamado...")
+    def extrair_matricula(texto):
+        if pd.isna(texto): return ""
+        match = re.search(r'\b\d+\b', str(texto))
+        return match.group(0) if match else str(texto).strip().upper()
+
+    df_sn['Matricula_Original'] = df_sn['Criacao_De_Original'].apply(extrair_matricula)
+    
+    def extrair_nome_sem_matricula(texto):
+        if pd.isna(texto): return ""
+        texto_limpo = re.sub(r'\b\d+\b', '', str(texto)).strip().upper()
+        texto_limpo = re.sub(r'[^A-Z\s]', '', texto_limpo)
+        return re.sub(r'\s+', ' ', texto_limpo).strip()
+
+    df_sn['Nome_Ativo_RH'] = df_sn['Criacao_De_Original'].apply(extrair_nome_sem_matricula)
+    
+    df_sn['Solicitante_Original'] = df_sn['Solicitante'].fillna('').astype(str).str.strip().str.upper()
+    df_sn['Formulário'] = df_sn['Item'].fillna('').astype(str).str.strip()
+
+    # 5. Cruzamento Principal via Canal
+    print("[5] Cruzando dados para atribuir a Gestão de cada Canal...")
+    df_merged = pd.merge(
+        df_sn,
+        df_canais[['Canal_Atendimento_Clean', 'Nome_Gestor_Clean', 'Email_Gestor_Clean', 'Gerência Geral']],
+        left_on='Canal_Clean',
+        right_on='Canal_Atendimento_Clean',
+        how='left'
     )
-
-    fig.update_layout(
-        xaxis_title="Mês e Ano",
-        yaxis_title="Total de Chamados",
-        plot_bgcolor='white'
-    )
     
-    # Adiciona o número total cravado no topo de cada barra
-    for _, row in df_plot.iterrows():
-        fig.add_annotation(
-            x=row['Competência_Mensal'], 
-            y=row['Total_Chamados'], 
-            text=str(row['Total_Chamados']),
-            showarrow=False,
-            yshift=10, 
-            font=dict(size=14, color="black", family="Arial Black")
-        )
-
-    # Remove contornos para visual limpo
-    fig.update_traces(marker_line_width=0)
+    # 6. Organização e Exportação Final
+    print("[6] Preparando arquivo final de exportação...")
+    colunas_finais = [
+        'Número', 'Competência_Mensal', 'Data_Criacao', 
+        'Matricula_Original', 'Nome_Ativo_RH', 'Solicitante_Original', 
+        'Canal_Clean', 'Formulário', 'Nome_Gestor_Clean', 'Email_Gestor_Clean', 'Gerência Geral'
+    ]
+    colunas_disponiveis = [col for col in colunas_finais if col in df_merged.columns]
     
-    caminho_html = arquivo_dados.parent / 'Dashboard_Fabiana_Mara.html'
-    fig.write_html(caminho_html)
-    print(f"\n[Sucesso] Gráfico gerado e salvo em: {caminho_html}")
-    fig.show()
+    df_final = df_merged[colunas_disponiveis].copy()
+    
+    df_final.rename(columns={
+        'Nome_Gestor_Clean': 'Nome_Gestor',
+        'Email_Gestor_Clean': 'Email_Gestor',
+        'Canal_Clean': 'Canal'
+    }, inplace=True)
+    
+    df_final.drop_duplicates(subset=['Número'], keep='first', inplace=True)
+    
+    arquivo_saida = pasta_resultados / "1_Chamados_Classificados_por_Gerencia.xlsx"
+    df_final.to_excel(arquivo_saida, index=False)
+    
+    print(f"\n[SUCESSO] Base final exportada para:")
+    print(f"Caminho: {arquivo_saida}")
+    print(f"Total de Registros (2026): {len(df_final)}")
 
 if __name__ == "__main__":
-    gerar_grafico_gestor()
+    main()
