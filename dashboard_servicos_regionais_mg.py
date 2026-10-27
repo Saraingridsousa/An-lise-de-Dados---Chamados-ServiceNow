@@ -52,6 +52,7 @@ def carregar_e_filtrar():
             "Feche o arquivo no Excel e execute o script novamente: "
             f"{ARQUIVO_ENTRADA}"
         ) from exc
+
     colunas_obrigatorias = {
         "Competência_Mensal",
         "Formulário",
@@ -64,37 +65,58 @@ def carregar_e_filtrar():
             + ", ".join(sorted(colunas_ausentes))
         )
 
-    formulario_normalizado = normalizar_texto(df["Formulário"])
     gerencia_normalizada = normalizar_texto(df["Gerência Geral"])
+    return df.loc[gerencia_normalizada.eq(GERENCIA_ALVO)].copy()
 
-    filtro = (
-        gerencia_normalizada.eq(GERENCIA_ALVO)
-        & ~formulario_normalizado.isin(FORMULARIOS_EXCLUIDOS)
+
+def classificar_formularios(df_gerencia):
+    df = df_gerencia.copy()
+    formulario_normalizado = normalizar_texto(df["Formulário"])
+    df["Tipo_Contagem"] = formulario_normalizado.map(
+        lambda formulario: (
+            "Inspeções CSC"
+            if formulario in FORMULARIOS_EXCLUIDOS
+            else "Demais formulários"
+        )
     )
-    return df.loc[filtro].copy()
+    return df
 
 
-def gerar_grafico(df_filtrado):
-    contagem_mensal = (
-        df_filtrado.groupby("Competência_Mensal", as_index=False)
+def preparar_contagens(df_gerencia):
+    df = classificar_formularios(df_gerencia)
+    tipos = ["Demais formulários", "Inspeções CSC"]
+    contagem = (
+        df.groupby(
+            ["Competência_Mensal", "Tipo_Contagem"], as_index=False
+        )
         .size()
         .rename(columns={"size": "Chamados_Abertos"})
     )
-    contagem_mensal = (
-        contagem_mensal.set_index("Competência_Mensal")
-        .reindex(MESES_2026, fill_value=0)
-        .rename_axis("Competência_Mensal")
+    grade = pd.MultiIndex.from_product(
+        [MESES_2026, tipos],
+        names=["Competência_Mensal", "Tipo_Contagem"],
+    )
+    contagem = (
+        contagem.set_index(["Competência_Mensal", "Tipo_Contagem"])
+        .reindex(grade, fill_value=0)
+        .rename_axis(["Competência_Mensal", "Tipo_Contagem"])
         .reset_index()
     )
 
-    detalhes_por_mes = (
-        df_filtrado.groupby(["Competência_Mensal", "Formulário"])
+    detalhes = (
+        df.groupby(
+            ["Competência_Mensal", "Tipo_Contagem", "Formulário"],
+            as_index=False,
+        )
         .size()
-        .reset_index(name="Quantidade")
-        .sort_values(["Competência_Mensal", "Quantidade"], ascending=[True, False])
+        .rename(columns={"size": "Quantidade"})
+        .sort_values(
+            ["Competência_Mensal", "Tipo_Contagem", "Quantidade"],
+            ascending=[True, True, False],
+        )
     )
     detalhes_hover = (
-        detalhes_por_mes.groupby("Competência_Mensal")
+        detalhes.groupby(["Competência_Mensal", "Tipo_Contagem"])
         .apply(
             lambda grupo: "<br>".join(
                 f"{formulario}: {quantidade}"
@@ -104,97 +126,105 @@ def gerar_grafico(df_filtrado):
             ),
             include_groups=False,
         )
-        .rename("Detalhamento")
+        .to_dict()
     )
-    contagem_mensal["Detalhamento"] = (
-        contagem_mensal["Competência_Mensal"]
-        .map(detalhes_hover)
-        .fillna("")
-    )
-    contagem_mensal["Mês"] = contagem_mensal["Competência_Mensal"].str[-2:].map(
-        NOMES_MESES
-    )
+    contagem["Detalhamento"] = [
+        detalhes_hover.get((mes, tipo), "")
+        for mes, tipo in zip(
+            contagem["Competência_Mensal"], contagem["Tipo_Contagem"]
+        )
+    ]
+    contagem["Mês"] = contagem["Competência_Mensal"].str[-2:].map(NOMES_MESES)
+    return df, contagem, detalhes
 
-    fig = px.bar(
-        contagem_mensal,
+
+def gerar_grafico(contagem):
+    figura = px.bar(
+        contagem,
         x="Mês",
         y="Chamados_Abertos",
         text="Chamados_Abertos",
-        title=(
-            "Formulários abertos por mês - Serviços Regionais - MG"
-        ),
+        color="Tipo_Contagem",
+        barmode="group",
+        color_discrete_map={
+            "Demais formulários": "#1f497d",
+            "Inspeções CSC": "#f2c94c",
+        },
+        title="Chamados abertos por mês - Serviços Regionais - MG",
         labels={
             "Mês": "Mês",
             "Chamados_Abertos": "Chamados abertos",
+            "Tipo_Contagem": "Tipo de formulário",
         },
     )
-    fig.update_traces(
-        marker_color="#1f497d",
+    figura.update_traces(
         textposition="outside",
         hovertemplate=(
             "<b>%{x}</b><br>"
-            "Total de chamados: %{y}<br><br>"
+            "<b>%{fullData.name}</b><br>"
+            "Total: %{y}<br><br>"
             "%{customdata[0]}<extra></extra>"
         ),
-        customdata=contagem_mensal[["Detalhamento", "Competência_Mensal"]],
+        customdata=contagem[["Detalhamento"]].to_numpy(),
     )
-    fig.update_layout(
+    figura.update_layout(
         xaxis_title="Mês",
         yaxis_title="Quantidade de chamados",
         plot_bgcolor="white",
-        showlegend=False,
+        barmode="group",
+        legend_title="Tipo de formulário",
     )
-    return contagem_mensal, fig
+    return figura
 
 
 def main():
     PASTA_RESULTADOS.mkdir(parents=True, exist_ok=True)
-    df_filtrado = carregar_e_filtrar()
+    df_gerencia = carregar_e_filtrar()
+
+    if df_gerencia.empty:
+        print("Nenhum chamado encontrado para a gerência informada.")
+        return
+
+    df_classificado, contagem_mensal, detalhamento = preparar_contagens(
+        df_gerencia
+    )
+    df_sem_inspecoes = df_classificado[
+        df_classificado["Tipo_Contagem"] == "Demais formulários"
+    ].drop(columns=["Tipo_Contagem"])
+    df_inspecoes = df_classificado[
+        df_classificado["Tipo_Contagem"] == "Inspeções CSC"
+    ].drop(columns=["Tipo_Contagem"])
 
     arquivo_filtrado = (
         PASTA_RESULTADOS
         / "Chamados_Servicos_Regionais_MG_Sem_Inspecoes.xlsx"
     )
-    df_filtrado.to_excel(arquivo_filtrado, index=False)
-
-    if df_filtrado.empty:
-        print("Nenhum chamado encontrado para os filtros informados.")
-        return
-
-    contagem_mensal, figura = gerar_grafico(df_filtrado)
-    detalhamento_formularios = (
-        df_filtrado.groupby(
-            ["Competência_Mensal", "Formulário"], as_index=False
-        )
-        .size()
-        .rename(columns={"size": "Chamados_Abertos"})
-        .sort_values(
-            ["Competência_Mensal", "Chamados_Abertos"],
-            ascending=[True, False],
-        )
+    arquivo_inspecoes = (
+        PASTA_RESULTADOS
+        / "Chamados_Servicos_Regionais_MG_Inspecoes_CSC.xlsx"
     )
     arquivo_contagem = (
         PASTA_RESULTADOS
         / "Chamados_Servicos_Regionais_MG_Contagem_Mensal.xlsx"
     )
-    arquivo_grafico = (
-        PASTA_RESULTADOS
-        / "Dashboard_Servicos_Regionais_MG.html"
-    )
-    contagem_mensal.astype({"Competência_Mensal": str}).to_excel(
-        arquivo_contagem, index=False
-    )
     arquivo_detalhamento = (
         PASTA_RESULTADOS
         / "Chamados_Servicos_Regionais_MG_Por_Formulario.xlsx"
     )
-    detalhamento_formularios.to_excel(arquivo_detalhamento, index=False)
-    figura.write_html(arquivo_grafico)
+    arquivo_grafico = (
+        PASTA_RESULTADOS
+        / "Dashboard_Servicos_Regionais_MG.html"
+    )
 
-    print(f"Chamados após os filtros: {len(df_filtrado)}")
-    print(f"Planilha filtrada: {arquivo_filtrado}")
-    print(f"Contagem mensal: {arquivo_contagem}")
-    print(f"Detalhamento por formulário: {arquivo_detalhamento}")
+    df_sem_inspecoes.to_excel(arquivo_filtrado, index=False)
+    df_inspecoes.to_excel(arquivo_inspecoes, index=False)
+    contagem_mensal.to_excel(arquivo_contagem, index=False)
+    detalhamento.to_excel(arquivo_detalhamento, index=False)
+    gerar_grafico(contagem_mensal).write_html(arquivo_grafico)
+
+    print(f"Chamados da gerência: {len(df_gerencia)}")
+    print(f"Demais formulários (barra azul): {len(df_sem_inspecoes)}")
+    print(f"Inspeções CSC (barra amarela): {len(df_inspecoes)}")
     print(f"Gráfico: {arquivo_grafico}")
 
 
