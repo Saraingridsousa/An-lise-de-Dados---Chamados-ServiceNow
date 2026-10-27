@@ -56,6 +56,7 @@ def carregar_e_filtrar():
     colunas_obrigatorias = {
         "Competência_Mensal",
         "Formulário",
+        "Grupo_Atribuicao",
         "Gerência Geral",
     }
     colunas_ausentes = colunas_obrigatorias.difference(df.columns)
@@ -79,6 +80,14 @@ def classificar_formularios(df_gerencia):
             else "Demais formulários"
         )
     )
+    df["Detalhamento"] = df["Formulário"]
+    df.loc[
+        df["Tipo_Contagem"].eq("Inspeções CSC"),
+        "Detalhamento",
+    ] = df.loc[
+        df["Tipo_Contagem"].eq("Inspeções CSC"),
+        "Grupo_Atribuicao",
+    ]
     return df
 
 
@@ -105,7 +114,7 @@ def preparar_contagens(df_gerencia):
 
     detalhes = (
         df.groupby(
-            ["Competência_Mensal", "Tipo_Contagem", "Formulário"],
+            ["Competência_Mensal", "Tipo_Contagem", "Detalhamento"],
             as_index=False,
         )
         .size()
@@ -121,7 +130,7 @@ def preparar_contagens(df_gerencia):
             lambda grupo: "<br>".join(
                 f"{formulario}: {quantidade}"
                 for formulario, quantidade in zip(
-                    grupo["Formulário"], grupo["Quantidade"]
+                    grupo["Detalhamento"], grupo["Quantidade"]
                 )
             ),
             include_groups=False,
