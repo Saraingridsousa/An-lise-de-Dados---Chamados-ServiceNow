@@ -204,6 +204,15 @@ def main():
         regex=True,
     )
     df_sn.loc[regional_mg, 'Gerencia_Desligado_Clean'] = 'SERVIÇOS REGIONAIS - MG'
+    regional_sp = df_sn['Unidade_Desligado_Clean'].isin(
+        [
+            'COORD. SERVICOS COMPARTILHADOS (SP)',
+            'GER. SERVICOS REGIONAIS CSC - SP',
+        ]
+    )
+    df_sn.loc[regional_sp, 'Gerencia_Desligado_Clean'] = (
+        'GER SERVICOS REGIONAIS CSC - SP'
+    )
 
     # 5. Identifica a gerência hierárquica pelo gestor do solicitante
     print("[5] Cruzando solicitante, gestor do RH e gerência...")
