@@ -9,6 +9,7 @@ def main():
     caminho_base = Path(r"C:\Users\99006526\MRS Logística SA\Otimização e Gestão Processos - x_mrsls_csc_sla")
     arquivo_canais = Path(r"C:\Users\99006526\MRS Logística SA\Otimização e Gestão Processos - Chamados Service Now\Canal por Coordenação.xlsx")
     arquivo_rh = Path(r"C:\Users\99006526\MRS Logística SA\Otimização e Gestão Processos - sys_user\Ativos RH 3.xlsx")
+    arquivo_desligados = Path(r"C:\Users\99006526\MRS Logística SA\Otimização e Gestão Processos - sys_user\RH- Relatório de desligados.xlsx")
     pasta_resultados = caminho_base / "resultados_correlacao_gerencias"
     
     pasta_resultados.mkdir(parents=True, exist_ok=True)
@@ -33,6 +34,7 @@ def main():
     df_sn = pd.concat(bases_service_now, ignore_index=True)
     df_canais = pd.read_excel(arquivo_canais, sheet_name='2026', dtype=str)
     df_rh = pd.read_excel(arquivo_rh, sheet_name='Ativos RH', dtype=str)
+    df_desligados = pd.read_excel(arquivo_desligados, dtype=str)
     
     # 2. Higieniza e padroniza e-mails na base de Canais
     def limpar_email(email):
@@ -74,6 +76,23 @@ def main():
     df_rh['Nome_Gestor_RH_Clean'] = df_rh['Nome Gestor'].fillna('').astype(str).str.strip().str.upper()
     df_rh['Email_Gestor_RH_Clean'] = df_rh['Email Gestor'].apply(limpar_email)
     df_rh['Nome_Clean'] = df_rh['Nome'].fillna('').astype(str).str.strip().str.upper()
+    df_desligados['Matricula_Clean'] = (
+        df_desligados['Nº pessoal']
+        .fillna('')
+        .astype(str)
+        .str.strip()
+        .str.replace(r'\.0$', '', regex=True)
+    )
+    df_desligados['Nome_Desligado_Clean'] = (
+        df_desligados['Nome'].fillna('').astype(str).str.strip().str.upper()
+    )
+    df_desligados['Unidade_Desligado_Clean'] = (
+        df_desligados['Desc.Unidade de Lotação']
+        .fillna('')
+        .astype(str)
+        .str.strip()
+        .str.upper()
+    )
 
     # 3. Limpeza Inicial do ServiceNow e formatação de datas
     print("[3] Higienizando colunas e convertendo datas...")
@@ -155,6 +174,37 @@ def main():
         df_sn['Nome_Ativo_RH']
     ).astype(str).str.strip().str.upper()
 
+    # Pessoas desligadas não possuem gestor na base de desligados. Quando
+    # a unidade de lotação identifica a regional, a gerência é atribuída
+    # diretamente, sem preencher um gestor que não foi informado.
+    desligados_por_matricula = (
+        df_desligados[df_desligados['Matricula_Clean'].ne('')]
+        .drop_duplicates('Matricula_Clean')
+        .set_index('Matricula_Clean')
+    )
+    df_sn['Nome_Desligado_Clean'] = df_sn['Matricula_Clean'].map(
+        desligados_por_matricula['Nome_Desligado_Clean']
+    )
+    df_sn['Unidade_Desligado_Clean'] = df_sn['Matricula_Clean'].map(
+        desligados_por_matricula['Unidade_Desligado_Clean']
+    )
+    desligados_por_nome = (
+        df_desligados[df_desligados['Nome_Desligado_Clean'].ne('')]
+        .drop_duplicates('Nome_Desligado_Clean')
+        .set_index('Nome_Desligado_Clean')
+    )
+    nome_solicitante = df_sn['Solicitante_Original']
+    df_sn['Unidade_Desligado_Clean'] = df_sn['Unidade_Desligado_Clean'].fillna(
+        nome_solicitante.map(desligados_por_nome['Unidade_Desligado_Clean'])
+    )
+    df_sn['Gerencia_Desligado_Clean'] = ''
+    regional_mg = df_sn['Unidade_Desligado_Clean'].str.contains(
+        r'COORD\. SERVICOS COMPARTILHADOS \(MG\)',
+        na=False,
+        regex=True,
+    )
+    df_sn.loc[regional_mg, 'Gerencia_Desligado_Clean'] = 'SERVIÇOS REGIONAIS - MG'
+
     # 5. Identifica a gerência hierárquica pelo gestor do solicitante
     print("[5] Cruzando solicitante, gestor do RH e gerência...")
     df_merged = pd.merge(
@@ -162,6 +212,9 @@ def main():
         gestores_canais,
         on='Email_Gestor_RH_Clean',
         how='left'
+    )
+    df_merged['Gerencia_Clean'] = df_merged['Gerencia_Clean'].fillna(
+        df_merged['Gerencia_Desligado_Clean']
     )
     
     # 6. Organização e Exportação Final
