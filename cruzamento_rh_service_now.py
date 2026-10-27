@@ -43,9 +43,26 @@ def main():
         return email
 
     df_canais['Grupo_Atribuicao_Clean'] = df_canais['Grupo de atribuição'].fillna('').astype(str).str.strip().str.upper()
-    df_canais['Nome_Gestor_Clean'] = df_canais['Coordenador'].fillna('').astype(str).str.strip().str.upper()
-    df_canais['Email_Gestor_Clean'] = df_canais['Coordenador'].apply(limpar_email)
-    df_canais['Gerencia_Geral_Clean'] = df_canais['Gerência'].fillna('').astype(str).str.strip().str.upper()
+    df_canais['Coordenador_Clean'] = df_canais['Coordenador'].apply(limpar_email)
+    df_canais['Gerente_Clean'] = df_canais['Gerente'].apply(limpar_email)
+    df_canais['Gerencia_Clean'] = df_canais['Gerência'].fillna('').astype(str).str.strip().str.upper()
+
+    # A gerência hierárquica do chamado é a gerência do gestor do solicitante.
+    # O gestor pode aparecer na coluna Coordenador ou Gerente da matriz de canais.
+    gestores_canais = pd.concat(
+        [
+            df_canais[['Coordenador_Clean', 'Gerencia_Clean']].rename(
+                columns={'Coordenador_Clean': 'Email_Gestor_RH_Clean'}
+            ),
+            df_canais[['Gerente_Clean', 'Gerencia_Clean']].rename(
+                columns={'Gerente_Clean': 'Email_Gestor_RH_Clean'}
+            ),
+        ],
+        ignore_index=True,
+    )
+    gestores_canais = gestores_canais[
+        gestores_canais['Email_Gestor_RH_Clean'].ne('')
+    ].drop_duplicates()
 
     df_rh['Matricula_Clean'] = (
         df_rh['Matricula']
@@ -56,6 +73,7 @@ def main():
     )
     df_rh['Nome_Gestor_RH_Clean'] = df_rh['Nome Gestor'].fillna('').astype(str).str.strip().str.upper()
     df_rh['Email_Gestor_RH_Clean'] = df_rh['Email Gestor'].apply(limpar_email)
+    df_rh['Nome_Clean'] = df_rh['Nome'].fillna('').astype(str).str.strip().str.upper()
 
     # 3. Limpeza Inicial do ServiceNow e formatação de datas
     print("[3] Higienizando colunas e convertendo datas...")
@@ -91,6 +109,10 @@ def main():
     df_sn['Nome_Ativo_RH'] = df_sn['Criacao_De_Original'].apply(extrair_nome_sem_matricula)
     
     df_sn['Solicitante_Original'] = df_sn['Nome do Solicitante'].fillna('').astype(str).str.strip().str.upper()
+    df_sn['Solicitante_Original'] = df_sn['Solicitante_Original'].where(
+        df_sn['Solicitante_Original'].ne(''),
+        df_sn['Solicitante'].fillna('').astype(str).str.strip().str.upper()
+    )
     df_sn['Formulário'] = df_sn['Formulário'].fillna('').astype(str).str.strip()
 
     df_sn['Matricula_Clean'] = (
@@ -118,13 +140,27 @@ def main():
     )
     df_sn['Nome_Ativo_RH'] = df_sn['Nome'].fillna(df_sn['Nome_Ativo_RH']).astype(str).str.strip().str.upper()
 
-    # 5. Cruzamento Principal via Canal
-    print("[5] Cruzando dados para atribuir a Gestão de cada Canal...")
+    # A partir de agosto, as exportações mensais não trazem a matrícula.
+    # Nesses arquivos, o solicitante é identificado pelo nome.
+    rh_por_nome = (
+        df_rh[df_rh['Nome_Clean'].ne('')]
+        .drop_duplicates('Nome_Clean')
+        .set_index('Nome_Clean')
+    )
+    nome_solicitante = df_sn['Solicitante_Original']
+    for coluna in ['Nome', 'Nome_Gestor_RH_Clean', 'Email_Gestor_RH_Clean']:
+        valores_por_nome = nome_solicitante.map(rh_por_nome[coluna])
+        df_sn[coluna] = df_sn[coluna].fillna(valores_por_nome)
+    df_sn['Nome_Ativo_RH'] = df_sn['Nome'].fillna(
+        df_sn['Nome_Ativo_RH']
+    ).astype(str).str.strip().str.upper()
+
+    # 5. Identifica a gerência hierárquica pelo gestor do solicitante
+    print("[5] Cruzando solicitante, gestor do RH e gerência...")
     df_merged = pd.merge(
         df_sn,
-        df_canais[['Grupo_Atribuicao_Clean', 'Nome_Gestor_Clean', 'Email_Gestor_Clean', 'Gerencia_Geral_Clean']],
-        left_on='Grupo_Atribuicao_Clean',
-        right_on='Grupo_Atribuicao_Clean',
+        gestores_canais,
+        on='Email_Gestor_RH_Clean',
         how='left'
     )
     
@@ -135,19 +171,17 @@ def main():
         'Matricula_Original', 'Nome_Ativo_RH', 'Solicitante_Original', 
         'Grupo_Atribuicao_Clean', 'Formulário',
         'Nome_Gestor_RH_Clean', 'Email_Gestor_RH_Clean',
-        'Nome_Gestor_Clean', 'Email_Gestor_Clean', 'Gerencia_Geral_Clean'
+        'Gerencia_Clean'
     ]
     colunas_disponiveis = [col for col in colunas_finais if col in df_merged.columns]
     
     df_final = df_merged[colunas_disponiveis].copy()
     
     df_final.rename(columns={
-        'Nome_Gestor_Clean': 'Nome_Gestor',
-        'Email_Gestor_Clean': 'Email_Gestor',
         'Grupo_Atribuicao_Clean': 'Grupo_Atribuicao',
-        'Nome_Gestor_RH_Clean': 'Nome_Gestor_RH',
+        'Nome_Gestor_RH_Clean': 'Nome_Gestor',
         'Email_Gestor_RH_Clean': 'Email_Gestor_RH',
-        'Gerencia_Geral_Clean': 'Gerência Geral'
+        'Gerencia_Clean': 'Gerência Geral'
     }, inplace=True)
     
     df_final.drop_duplicates(subset=['Número'], keep='first', inplace=True)
