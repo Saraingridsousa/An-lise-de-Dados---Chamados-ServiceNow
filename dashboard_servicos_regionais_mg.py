@@ -1,5 +1,5 @@
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 from pathlib import Path
 
 
@@ -139,35 +139,32 @@ def preparar_contagens(df_gerencia):
 
 
 def gerar_grafico(contagem):
-    figura = px.bar(
-        contagem,
-        x="Mês",
-        y="Chamados_Abertos",
-        text="Chamados_Abertos",
-        color="Tipo_Contagem",
-        barmode="group",
-        color_discrete_map={
-            "Demais formulários": "#1f497d",
-            "Inspeções CSC": "#f2c94c",
-        },
-        title="Chamados abertos por mês - Serviços Regionais - MG",
-        labels={
-            "Mês": "Mês",
-            "Chamados_Abertos": "Chamados abertos",
-            "Tipo_Contagem": "Tipo de formulário",
-        },
-    )
-    figura.update_traces(
-        textposition="outside",
-        hovertemplate=(
-            "<b>%{x}</b><br>"
-            "<b>%{fullData.name}</b><br>"
-            "Total: %{y}<br><br>"
-            "%{customdata[0]}<extra></extra>"
-        ),
-        customdata=contagem[["Detalhamento"]].to_numpy(),
-    )
+    figura = go.Figure()
+    cores = {
+        "Demais formulários": "#1f497d",
+        "Inspeções CSC": "#f2c94c",
+    }
+    for tipo in ["Demais formulários", "Inspeções CSC"]:
+        dados_tipo = contagem[contagem["Tipo_Contagem"] == tipo]
+        figura.add_trace(
+            go.Bar(
+                name=tipo,
+                x=dados_tipo["Mês"],
+                y=dados_tipo["Chamados_Abertos"],
+                text=dados_tipo["Chamados_Abertos"],
+                marker_color=cores[tipo],
+                customdata=dados_tipo[["Detalhamento"]].to_numpy(),
+                hovertemplate=(
+                    "<b>%{x}</b><br>"
+                    f"<b>{tipo}</b><br>"
+                    "Total: %{y}<br><br>"
+                    "%{customdata[0]}<extra></extra>"
+                ),
+                textposition="outside",
+            )
+        )
     figura.update_layout(
+        title="Chamados abertos por mês - Serviços Regionais - MG",
         xaxis_title="Mês",
         yaxis_title="Quantidade de chamados",
         plot_bgcolor="white",
